@@ -1,6 +1,7 @@
 import Foundation
 
 runUnreadCountTests()
+runLinkRouterTests()
 
 if testFailures > 0 {
     print("\(testFailures) failures")
