@@ -14,11 +14,16 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
     }
 
     func requestAuthorization() {
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, error in
-            if let error {
+        // Async API, not a completion closure: UserNotifications calls completion handlers on its own
+        // queue, and a closure written in this @MainActor class can be compiled as main-actor isolated,
+        // which traps at runtime when called off the main thread (crash seen on launch).
+        Task {
+            do {
+                if try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) == false {
+                    NSLog("[um] notification authorization denied")
+                }
+            } catch {
                 NSLog("[um] notification authorization error: %@", error.localizedDescription)
-            } else if !granted {
-                NSLog("[um] notification authorization denied")
             }
         }
     }
@@ -34,8 +39,10 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
         content.userInfo = info
 
         let request = UNNotificationRequest(identifier: identifier, content: content, trigger: nil)
-        UNUserNotificationCenter.current().add(request) { error in
-            if let error {
+        Task {
+            do {
+                try await UNUserNotificationCenter.current().add(request)
+            } catch {
                 NSLog("[um] failed to post notification: %@", error.localizedDescription)
             }
         }
