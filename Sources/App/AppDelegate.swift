@@ -6,6 +6,9 @@ import WebKit
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let model = AppModel()
+    /// Created with the delegate so it is the notification center's delegate before launch completes.
+    let notifier = Notifier()
+    private var gate = FallbackGate()
     private(set) var controllers: [ServiceID: ServiceWebController] = [:]
     private var window: NSWindow!
     /// Keeps App Nap from throttling the background web views. Held for the app's lifetime.
@@ -17,10 +20,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         activity = ProcessInfo.processInfo.beginActivity(options: .userInitiatedAllowingIdleSystemSleep, reason: "Receive messages")
 
         for service in Service.all {
+            let id = service.id
             let controller = ServiceWebController(service: service)
-            controller.onMessage = { _ in } // Task 6 wires titles and notifications.
-            controllers[service.id] = controller
+            controller.onMessage = { [weak self] message in self?.handle(message, from: id) }
+            // Each new document reports its count afresh; its first real count is a new baseline.
+            controller.onDocumentCommitted = { [weak self] in self?.gate.resetBaseline(id) }
+            controller.onLoadFinished = { [weak self] in self?.updatePageVisibility() }
+            controllers[id] = controller
         }
+
+        notifier.onClick = { [weak self] service, pageID in
+            guard let self else { return }
+            self.show(service)
+            if let pageID { self.controllers[service]?.notificationClicked(id: pageID) }
+        }
+        notifier.requestAuthorization()
 
         NSApp.mainMenu = makeMainMenu()
         window = makeWindow()
@@ -32,6 +46,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         show(model.selected)
         return true
     }
+
+    func applicationDidBecomeActive(_ notification: Notification) { updatePageVisibility() }
+    func applicationDidResignActive(_ notification: Notification) { updatePageVisibility() }
+    func applicationDidHide(_ notification: Notification) { updatePageVisibility() }
+    func applicationDidUnhide(_ notification: Notification) { updatePageVisibility() }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false
@@ -45,8 +64,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         sender.orderOut(nil)
+        updatePageVisibility()
         return false
     }
+
+    func windowDidMiniaturize(_ notification: Notification) { updatePageVisibility() }
+    func windowDidDeminiaturize(_ notification: Notification) { updatePageVisibility() }
 
     // MARK: - Showing services
 
@@ -56,6 +79,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         applySelection()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate()
+        updatePageVisibility()
     }
 
     private func observeSelection() {
@@ -72,13 +96,93 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// Unhides only the selected web view. Both stay in the view hierarchy so their pages keep running.
     private func applySelection() {
         for (id, controller) in controllers {
-            let isSelected = id == model.selected
-            controller.webView.isHidden = !isSelected
-            controller.setPageVisible(isSelected) // Task 6 refines this with window/app visibility.
+            controller.webView.isHidden = id != model.selected
         }
         if let selected = controllers[model.selected]?.webView, window?.isVisible == true {
             window.makeFirstResponder(selected)
         }
+        updatePageVisibility()
+    }
+
+    // MARK: - Visibility
+
+    /// True when the app is frontmost, the window is on screen and `id` is the selected service.
+    private func isUserLooking(at id: ServiceID) -> Bool {
+        let windowVisible = window.map { $0.isVisible && !$0.isMiniaturized } ?? false
+        return NotificationRules.isUserLooking(
+            at: id, appIsActive: NSApp.isActive, windowVisible: windowVisible, selected: model.selected
+        )
+    }
+
+    /// Tells every page whether the user is looking at it. The bridge fakes a focused, visible
+    /// page when told visible, so this must turn false whenever the user switches away.
+    private func updatePageVisibility() {
+        for (id, controller) in controllers {
+            controller.setPageVisible(isUserLooking(at: id))
+        }
+    }
+
+    // MARK: - Bridge messages, badges and notifications
+
+    private func handle(_ message: [String: Any], from id: ServiceID) {
+        switch message["type"] as? String {
+        case "title":
+            handleTitle(message["title"] as? String ?? "", from: id)
+        case "notify":
+            handlePageNotification(message, from: id)
+        default:
+            break
+        }
+    }
+
+    private func handleTitle(_ title: String, from id: ServiceID) {
+        // Documents report an empty title at start; treating it as "0 unread" would make the
+        // real count look like a rise (a launch banner) and flicker the badges.
+        guard !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        let count = UnreadCount.parse(title: title)
+        model.unread[id] = count
+        let total = model.totalUnread
+        NSApp.dockTile.badgeLabel = total > 0 ? "\(total)" : nil
+
+        let now = Date()
+        guard let due = gate.noteUnread(id, count: count, at: now) else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + max(due.timeIntervalSince(now), 0)) { [weak self] in
+            MainActor.assumeIsolated {
+                self?.checkFallback(for: id, roseAt: now)
+            }
+        }
+    }
+
+    private func checkFallback(for id: ServiceID, roseAt: Date) {
+        guard gate.shouldPostFallback(id, roseAt: roseAt, now: Date()) else { return }
+        let count = model.unread[id] ?? 0
+        guard count > 0 else { return } // read elsewhere in the meantime
+        guard !isUserLooking(at: id) else {
+            NSLog("[um] %@ fallback (suppressed: user is looking)", id.rawValue)
+            return
+        }
+        NSLog("[um] %@ fallback", id.rawValue)
+        let text = NotificationRules.fallbackText(for: id, unread: count)
+        notifier.post(
+            identifier: NotificationRules.fallbackIdentifier(for: id),
+            title: text.title, body: text.body, service: id, pageNotificationID: nil
+        )
+    }
+
+    private func handlePageNotification(_ message: [String: Any], from id: ServiceID) {
+        gate.notePageNotification(id, at: Date())
+        guard let pageID = message["id"] as? String else { return }
+        guard !isUserLooking(at: id) else {
+            NSLog("[um] %@ page notification (suppressed: user is looking)", id.rawValue)
+            return
+        }
+        NSLog("[um] %@ page notification", id.rawValue)
+        notifier.post(
+            identifier: NotificationRules.pageIdentifier(for: id, notificationID: pageID),
+            title: message["title"] as? String ?? "",
+            body: message["body"] as? String ?? "",
+            service: id, pageNotificationID: pageID
+        )
     }
 
     // MARK: - Window
@@ -133,7 +237,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @objc private func showMessenger(_ sender: Any?) { show(.messenger) }
     @objc private func showInstagram(_ sender: Any?) { show(.instagram) }
     @objc private func reloadCurrent(_ sender: Any?) { controllers[model.selected]?.reload() }
-    @objc private func hideWindow(_ sender: Any?) { window.orderOut(nil) }
+    @objc private func hideWindow(_ sender: Any?) {
+        window.orderOut(nil)
+        updatePageVisibility()
+    }
 
     // MARK: - Menus
 

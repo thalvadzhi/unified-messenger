@@ -12,6 +12,10 @@ final class ServiceWebController: NSObject, WKNavigationDelegate, WKUIDelegate, 
     let webView: WKWebView
     /// Parsed bridge messages (`{type: "title" | "notify", ...}`) from the main frame.
     var onMessage: (([String: Any]) -> Void)?
+    /// A new main-frame document was committed (its bridge state starts fresh).
+    var onDocumentCommitted: (() -> Void)?
+    /// A main-frame load finished.
+    var onLoadFinished: (() -> Void)?
 
     private var pageVisible = false
     private var firstLoadDone = false
@@ -81,7 +85,8 @@ final class ServiceWebController: NSObject, WKNavigationDelegate, WKUIDelegate, 
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         guard message.frameInfo.isMainFrame,
-              let body = message.body as? [String: Any] else { return }
+              let body = message.body as? [String: Any],
+              body["service"] as? String == service.id.rawValue else { return }
         onMessage?(body)
     }
 
@@ -112,8 +117,13 @@ final class ServiceWebController: NSObject, WKNavigationDelegate, WKUIDelegate, 
         download.delegate = self
     }
 
+    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        onDocumentCommitted?()
+    }
+
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         applyVisibility()
+        onLoadFinished?()
         if !firstLoadDone {
             firstLoadDone = true
             if service.id == .messenger, !isServiceHost(webView.url) {

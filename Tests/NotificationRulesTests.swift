@@ -39,4 +39,15 @@ func runNotificationRulesTests() {
         var g = FallbackGate(); g.notePageNotification(.messenger, at: t0)
         check(g.shouldPostFallback(.instagram, roseAt: t0, now: t0.addingTimeInterval(3)), "")
     }
+    test("reset baseline makes next count a baseline") {
+        var g = FallbackGate(); _ = g.noteUnread(.messenger, count: 0, at: t0)
+        g.resetBaseline(.messenger)
+        check(g.noteUnread(.messenger, count: 3, at: t0) == nil, "after reset")
+        check(g.noteUnread(.messenger, count: 4, at: t0) == t0.addingTimeInterval(3), "rise after new baseline")
+    }
+    test("reset baseline is per service") {
+        var g = FallbackGate(); _ = g.noteUnread(.instagram, count: 1, at: t0)
+        g.resetBaseline(.messenger)
+        check(g.noteUnread(.instagram, count: 2, at: t0) != nil, "")
+    }
 }

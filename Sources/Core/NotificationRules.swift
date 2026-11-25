@@ -33,6 +33,11 @@ struct FallbackGate {
         return at.addingTimeInterval(NotificationRules.fallbackDelay)
     }
 
+    /// Forgets the last count so the next one is a fresh baseline (e.g. after a page load).
+    mutating func resetBaseline(_ s: ServiceID) {
+        lastCount[s] = nil
+    }
+
     func shouldPostFallback(_ s: ServiceID, roseAt: Date, now: Date) -> Bool {
         guard let last = lastPageNotification[s] else { return true }
         return !(last >= roseAt.addingTimeInterval(-NotificationRules.fallbackDelay) && last <= now)
