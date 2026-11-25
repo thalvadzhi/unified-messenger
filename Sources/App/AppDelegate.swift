@@ -10,8 +10,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// Created with the delegate so it is the notification center's delegate before launch completes.
     let notifier = Notifier()
     private var gate = FallbackGate()
-    /// Last real "(N)" badge per service; a flashing title mustn't zero the fallback banner's count.
-    private var lastBadge: [ServiceID: Int] = [:]
+    /// Sidebar/Dock counts; a flashing title mustn't zero them (or the fallback banner's count).
+    private var displayed = DisplayedUnread()
+    /// Last announced fallback count per service, so a flashing title doesn't repeat banners.
+    private var dedup = FallbackDedup()
     private(set) var controllers: [ServiceID: ServiceWebController] = [:]
     private var window: NSWindow!
     /// Keeps App Nap from throttling the background web views. Held for the app's lifetime.
@@ -139,6 +141,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         for (id, controller) in controllers {
             controller.setPageVisible(isUserLooking(at: id))
         }
+        refreshBadges()
     }
 
     // MARK: - Bridge messages, badges and notifications
@@ -160,12 +163,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         // A badge-less title ("Messenger", "Ann messaged you") shows 0 but is not a gate count.
         let badge = UnreadCount.badge(title: title)
-        model.unread[id] = badge ?? 0
-        if let badge { lastBadge[id] = badge }
-        let total = model.totalUnread
-        NSApp.dockTile.badgeLabel = total > 0 ? "\(total)" : nil
-
         let now = Date()
+        if let zeroAt = displayed.note(id, badge: badge, at: now) {
+            // The bridge posts titles only on change, so recheck when the badge-less title
+            // would count as read, to show 0 then even if no new title arrives.
+            DispatchQueue.main.asyncAfter(deadline: .now() + max(zeroAt.timeIntervalSince(now), 0) + 0.1) { [weak self] in
+                MainActor.assumeIsolated { self?.refreshBadges() }
+            }
+        }
+        refreshBadges()
+
         guard let due = gate.noteUnread(id, badge: badge, at: now) else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + max(due.timeIntervalSince(now), 0)) { [weak self] in
             MainActor.assumeIsolated {
@@ -174,14 +181,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
+    /// Shows the displayed counts in the sidebar and Dock, and resets fallback de-duplication for
+    /// services the user is looking at or whose count dropped to 0.
+    private func refreshBadges() {
+        let now = Date()
+        for service in Service.all {
+            let count = displayed.count(service.id, at: now)
+            if model.unread[service.id] != count { model.unread[service.id] = count }
+            dedup.update(service.id, displayed: count, userLooking: isUserLooking(at: service.id))
+        }
+        let total = model.totalUnread
+        let label = total > 0 ? "\(total)" : nil
+        if NSApp.dockTile.badgeLabel != label { NSApp.dockTile.badgeLabel = label }
+    }
+
     private func checkFallback(for id: ServiceID, roseAt: Date) {
         guard gate.shouldPostFallback(id, roseAt: roseAt, now: Date()) else { return }
-        let count = lastBadge[id] ?? 0
+        let count = displayed.lastBadge(id)
         guard count > 0 else { return } // read elsewhere in the meantime
         guard !isUserLooking(at: id) else {
             NSLog("[um] %@ fallback (suppressed: user is looking)", id.rawValue)
             return
         }
+        guard dedup.shouldAnnounce(id, count: count) else {
+            NSLog("[um] %@ fallback (suppressed: %d already announced)", id.rawValue, count)
+            return
+        }
+        dedup.didAnnounce(id, count: count)
         NSLog("[um] %@ fallback", id.rawValue)
         let text = NotificationRules.fallbackText(for: id, unread: count)
         notifier.post(
@@ -199,7 +225,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         NSLog("[um] %@ page notification", id.rawValue)
         notifier.post(
-            identifier: NotificationRules.pageIdentifier(for: id, notificationID: pageID),
+            identifier: NotificationRules.pageIdentifier(for: id, notificationID: pageID, tag: message["tag"] as? String),
             title: message["title"] as? String ?? "",
             body: message["body"] as? String ?? "",
             service: id, pageNotificationID: pageID
