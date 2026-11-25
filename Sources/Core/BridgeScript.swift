@@ -21,7 +21,9 @@ enum BridgeScript {
         (function () {
           "use strict";
           if (window.__umInstalled) { return; }
-          window.__umInstalled = true;
+          try {
+            Object.defineProperty(window, "__umInstalled", { value: true, configurable: true, enumerable: false });
+          } catch (e) { window.__umInstalled = true; }
 
           var SERVICE = "\#(service.rawValue)";
           var HANDLER = "\#(handlerName)";
@@ -46,6 +48,8 @@ enum BridgeScript {
           function str(v) { return v === undefined || v === null ? "" : String(v); }
 
           // ---- Notifications ----
+          // Per-load prefix: macOS banners outlive the page, so ids must not repeat across reloads.
+          var LOAD = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
           var nextID = 0;
           var live = {};
           var liveOrder = [];
@@ -79,7 +83,7 @@ enum BridgeScript {
           function notify(title, options) {
             var o = options || {};
             nextID += 1;
-            var id = String(nextID);
+            var id = LOAD + "-" + nextID;
             post({ type: "notify", id: id, title: str(title), body: str(o.body), tag: str(o.tag) });
             return id;
           }

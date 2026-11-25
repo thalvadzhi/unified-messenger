@@ -115,6 +115,18 @@ func runBridgeScriptTests() {
         check(ctx.exception == nil, "unknown id is harmless")
     }
 
+    test("bridge notification ids differ across page loads") {
+        let a = makeBridgeContext(), b = makeBridgeContext()
+        js(a, "new Notification('x')"); js(b, "new Notification('x')")
+        let ida = posted(a).last?["id"] as? String ?? "", idb = posted(b).last?["id"] as? String ?? ""
+        check(!ida.isEmpty && !idb.isEmpty && ida != idb, "\(ida) vs \(idb)")
+    }
+
+    test("bridge install flag is not enumerable") {
+        let ctx = makeBridgeContext()
+        check(js(ctx, "window.__umInstalled === true && Object.keys(window).indexOf('__umInstalled') < 0").toBool(), "")
+    }
+
     test("bridge close calls onclose") {
         let ctx = makeBridgeContext()
         js(ctx, "var closed = false; var c = new Notification('C'); c.onclose = function () { closed = true; }; c.close();")
