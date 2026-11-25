@@ -7,7 +7,7 @@ APP="build/Unified Messenger.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
-swiftc -O -target arm64-apple-macosx14.0 Sources/Core/*.swift Sources/App/*.swift \
+swiftc -O -swift-version 6 -target arm64-apple-macosx14.0 Sources/Core/*.swift Sources/App/*.swift \
   -o "$APP/Contents/MacOS/UnifiedMessenger"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 codesign --force --deep -s - "$APP"
