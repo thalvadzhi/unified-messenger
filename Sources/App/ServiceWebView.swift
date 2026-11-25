@@ -1,4 +1,5 @@
 import AppKit
+import Network
 import WebKit
 
 /// Owns one service's persistent `WKWebView`: its data store, the injected bridge,
@@ -20,6 +21,12 @@ final class ServiceWebController: NSObject, WKNavigationDelegate, WKUIDelegate, 
     private var pageVisible = false
     private var firstLoadDone = false
     private var fallbackUsed = false
+
+    /// Pending retry after a network failure; cancelled when a load commits.
+    private var retryTask: Task<Void, Never>?
+    private var retryURL: URL?
+    private var retryFailures = 0
+    private let pathMonitor = NWPathMonitor()
 
     init(service: Service) {
         self.service = service
@@ -46,6 +53,13 @@ final class ServiceWebController: NSObject, WKNavigationDelegate, WKUIDelegate, 
         webView.navigationDelegate = self
         webView.uiDelegate = self
         webView.load(URLRequest(url: service.startURL))
+
+        // Retries right away when the network comes back instead of waiting out the backoff.
+        pathMonitor.pathUpdateHandler = { [weak self] path in
+            guard path.status == .satisfied else { return }
+            Task { @MainActor in self?.retryNow() }
+        }
+        pathMonitor.start(queue: .main)
     }
 
     // MARK: - Commands
@@ -127,10 +141,13 @@ final class ServiceWebController: NSObject, WKNavigationDelegate, WKUIDelegate, 
     }
 
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        cancelRetry() // the network works, and a stale retry mustn't replace this page
         onDocumentCommitted?()
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        cancelRetry()
+        retryFailures = 0
         applyVisibility()
         onLoadFinished?()
         if !firstLoadDone {
@@ -158,9 +175,44 @@ final class ServiceWebController: NSObject, WKNavigationDelegate, WKUIDelegate, 
         // Cancellations (redirects, policy decisions, downloads) are not real failures.
         if nsError.domain == NSURLErrorDomain, nsError.code == NSURLErrorCancelled { return }
         if nsError.domain == "WebKitErrorDomain", nsError.code == 102 { return } // frame load interrupted by policy change
+        // Offline (e.g. Wi-Fi not up yet at login): retry the same page later. This must not
+        // count as the first load, or Messenger would spend its one-time fallback on it.
+        if LoadRules.isRetryableNetworkError(domain: nsError.domain, code: nsError.code) {
+            let failing = nsError.userInfo[NSURLErrorFailingURLErrorKey] as? URL
+            scheduleRetry(of: failing ?? webView.url ?? service.startURL)
+            return
+        }
         guard !firstLoadDone else { return }
         firstLoadDone = true
         if service.id == .messenger { loadMessengerFallback() }
+    }
+
+    // MARK: - Network retry
+
+    private func scheduleRetry(of url: URL) {
+        retryTask?.cancel()
+        retryURL = url
+        let delay = LoadRules.retryDelay(afterFailures: retryFailures)
+        retryFailures += 1
+        NSLog("[um] %@ load failed offline; retrying in %.0f s", service.id.rawValue, delay)
+        retryTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(delay))
+            guard !Task.isCancelled else { return }
+            self?.retryNow()
+        }
+    }
+
+    /// Loads the pending retry URL now, if a retry is pending.
+    private func retryNow() {
+        guard let url = retryURL else { return }
+        cancelRetry()
+        webView.load(URLRequest(url: url))
+    }
+
+    private func cancelRetry() {
+        retryTask?.cancel()
+        retryTask = nil
+        retryURL = nil
     }
 
     /// True when `url` is on one of the service's own hosts (e.g. a meta.com login page counts).
