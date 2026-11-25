@@ -1,5 +1,6 @@
 import AppKit
 import Observation
+import ServiceManagement
 import SwiftUI
 import WebKit
 
@@ -16,7 +17,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// Keeps App Nap from throttling the background web views. Held for the app's lifetime.
     private var activity: NSObjectProtocol?
 
+    /// True when the system opened the app as a login item; the window then stays hidden.
+    private var launchedAtLogin = false
+
     // MARK: - NSApplicationDelegate
+
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        if let event = NSAppleEventManager.shared().currentAppleEvent,
+           event.eventID == AEEventID(kAEOpenApplication),
+           event.paramDescriptor(forKeyword: AEKeyword(keyAEPropData))?.enumCodeValue == OSType(keyAELaunchedAsLogInItem) {
+            launchedAtLogin = true
+        }
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         activity = ProcessInfo.processInfo.beginActivity(options: .userInitiatedAllowingIdleSystemSleep, reason: "Receive messages")
@@ -38,10 +50,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         notifier.requestAuthorization()
 
+        registerLoginItemOnFirstLaunch()
         NSApp.mainMenu = makeMainMenu()
         window = makeWindow()
         observeSelection()
-        show(model.selected)
+        if launchedAtLogin {
+            applySelection() // web views keep loading in the hidden window
+        } else {
+            show(model.selected)
+        }
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -236,6 +253,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return window
     }
 
+    // MARK: - Menu validation
+
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        if item.action == #selector(toggleLoginItem(_:)) {
+            item.state = SMAppService.mainApp.status == .enabled ? .on : .off
+        }
+        return true
+    }
+
     // MARK: - Menu actions
 
     @objc private func showMessenger(_ sender: Any?) { show(.messenger) }
@@ -244,6 +270,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @objc private func hideWindow(_ sender: Any?) {
         window.orderOut(nil)
         updatePageVisibility()
+    }
+
+    // MARK: - Login item
+
+    private func registerLoginItemOnFirstLaunch() {
+        let defaults = UserDefaults.standard
+        guard !defaults.bool(forKey: "loginItemInitialized") else { return }
+        do {
+            try SMAppService.mainApp.register()
+        } catch {
+            NSLog("[um] login item: %@", error.localizedDescription)
+        }
+        defaults.set(true, forKey: "loginItemInitialized")
+    }
+
+    @objc private func toggleLoginItem(_ sender: Any?) {
+        let service = SMAppService.mainApp
+        do {
+            switch service.status {
+            case .enabled:
+                try service.unregister()
+            case .requiresApproval:
+                SMAppService.openSystemSettingsLoginItems()
+            default:
+                try service.register()
+            }
+        } catch {
+            NSLog("[um] login item: %@", error.localizedDescription)
+        }
     }
 
     // MARK: - Menus
@@ -255,6 +310,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let appMenu = NSMenu(title: appName)
         appMenu.addItem(withTitle: "About \(appName)",
                         action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: "Open at Login", action: #selector(toggleLoginItem(_:)), keyEquivalent: "").target = self
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Quit \(appName)", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         addSubmenu(appMenu, to: main)
