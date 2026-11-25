@@ -9,6 +9,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// Created with the delegate so it is the notification center's delegate before launch completes.
     let notifier = Notifier()
     private var gate = FallbackGate()
+    /// Last real "(N)" badge per service; a flashing title mustn't zero the fallback banner's count.
+    private var lastBadge: [ServiceID: Int] = [:]
     private(set) var controllers: [ServiceID: ServiceWebController] = [:]
     private var window: NSWindow!
     /// Keeps App Nap from throttling the background web views. Held for the app's lifetime.
@@ -24,7 +26,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let controller = ServiceWebController(service: service)
             controller.onMessage = { [weak self] message in self?.handle(message, from: id) }
             // Each new document reports its count afresh; its first real count is a new baseline.
-            controller.onDocumentCommitted = { [weak self] in self?.gate.resetBaseline(id) }
+            controller.onDocumentCommitted = { [weak self] in self?.gate.resetBaseline(id, at: Date()) }
             controller.onLoadFinished = { [weak self] in self?.updatePageVisibility() }
             controllers[id] = controller
         }
@@ -139,13 +141,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // Documents report an empty title at start; treating it as "0 unread" would make the
         // real count look like a rise (a launch banner) and flicker the badges.
         guard !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        let count = UnreadCount.parse(title: title)
-        model.unread[id] = count
+        // A badge-less title ("Messenger", "Ann messaged you") shows 0 but is not a gate count.
+        let badge = UnreadCount.badge(title: title)
+        model.unread[id] = badge ?? 0
+        if let badge { lastBadge[id] = badge }
         let total = model.totalUnread
         NSApp.dockTile.badgeLabel = total > 0 ? "\(total)" : nil
 
         let now = Date()
-        guard let due = gate.noteUnread(id, count: count, at: now) else { return }
+        guard let due = gate.noteUnread(id, badge: badge, at: now) else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + max(due.timeIntervalSince(now), 0)) { [weak self] in
             MainActor.assumeIsolated {
                 self?.checkFallback(for: id, roseAt: now)
@@ -155,7 +159,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func checkFallback(for id: ServiceID, roseAt: Date) {
         guard gate.shouldPostFallback(id, roseAt: roseAt, now: Date()) else { return }
-        let count = model.unread[id] ?? 0
+        let count = lastBadge[id] ?? 0
         guard count > 0 else { return } // read elsewhere in the meantime
         guard !isUserLooking(at: id) else {
             NSLog("[um] %@ fallback (suppressed: user is looking)", id.rawValue)
