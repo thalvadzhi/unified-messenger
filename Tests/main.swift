@@ -4,6 +4,7 @@ runUnreadCountTests()
 runLinkRouterTests()
 runNotificationRulesTests()
 runBridgeScriptTests()
+runServiceTests()
 runLoadRulesTests()
 
 if testFailures > 0 {

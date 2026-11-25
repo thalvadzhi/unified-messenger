@@ -41,3 +41,21 @@ extension Service {
         }
     }
 }
+
+extension Service {
+    /// True when `url` is on the service's own app (where "Go to Inbox" leads): Messenger is
+    /// messenger.com or facebook.com/messages, Instagram is instagram.com/direct.
+    func isHome(_ url: URL) -> Bool {
+        guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https",
+              let host = url.host?.lowercased() else { return false }
+        func on(_ domain: String) -> Bool { host == domain || host.hasSuffix("." + domain) }
+        func under(_ prefix: String) -> Bool {
+            let path = url.path.lowercased()
+            return path == prefix || path.hasPrefix(prefix + "/")
+        }
+        switch id {
+        case .messenger: return on("messenger.com") || (on("facebook.com") && under("/messages"))
+        case .instagram: return on("instagram.com") && under("/direct")
+        }
+    }
+}

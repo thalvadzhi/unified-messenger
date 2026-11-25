@@ -72,6 +72,23 @@ final class ServiceWebController: NSObject, WKNavigationDelegate, WKUIDelegate, 
         }
     }
 
+    var canGoBack: Bool { webView.canGoBack }
+
+    func goBack() {
+        if webView.canGoBack { webView.goBack() }
+    }
+
+    /// Loads the service's inbox (its start URL).
+    func goHome() {
+        webView.load(URLRequest(url: service.startURL))
+    }
+
+    /// True when the page is somewhere other than the service's own app (or nothing has loaded).
+    var isAwayFromHome: Bool {
+        guard let url = webView.url else { return false }
+        return !service.isHome(url)
+    }
+
     /// Tells the page whether it is on screen. The value is re-applied after every load,
     /// because each new document starts hidden.
     func setPageVisible(_ visible: Bool) {

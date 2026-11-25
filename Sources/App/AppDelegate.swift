@@ -5,7 +5,7 @@ import SwiftUI
 import WebKit
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuItemValidation {
     let model = AppModel()
     /// Created with the delegate so it is the notification center's delegate before launch completes.
     let notifier = Notifier()
@@ -282,17 +282,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     // MARK: - Menu validation
 
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
-        if item.action == #selector(toggleLoginItem(_:)) {
+        switch item.action {
+        case #selector(toggleLoginItem(_:)):
             item.state = SMAppService.mainApp.status == .enabled ? .on : .off
+            return true
+        case #selector(goBack(_:)):
+            return controllers[model.selected]?.canGoBack ?? false
+        default:
+            return true
         }
-        return true
     }
 
     // MARK: - Menu actions
 
-    @objc private func showMessenger(_ sender: Any?) { show(.messenger) }
-    @objc private func showInstagram(_ sender: Any?) { show(.instagram) }
+    @objc private func showMessenger(_ sender: Any?) { showFromMenu(.messenger) }
+    @objc private func showInstagram(_ sender: Any?) { showFromMenu(.instagram) }
     @objc private func reloadCurrent(_ sender: Any?) { controllers[model.selected]?.reload() }
+    @objc private func goBack(_ sender: Any?) { controllers[model.selected]?.goBack() }
+    @objc private func goHome(_ sender: Any?) { controllers[model.selected]?.goHome() }
+
+    /// ⌘1/⌘2: shows the service; pressed again for the already-selected service that has
+    /// wandered off its own app, it returns to the inbox.
+    private func showFromMenu(_ id: ServiceID) {
+        let wasSelected = model.selected == id && window.isVisible
+        show(id)
+        if wasSelected, let controller = controllers[id], controller.isAwayFromHome {
+            controller.goHome()
+        }
+    }
     @objc private func hideWindow(_ sender: Any?) {
         window.orderOut(nil)
         updatePageVisibility()
@@ -339,6 +356,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Open at Login", action: #selector(toggleLoginItem(_:)), keyEquivalent: "").target = self
         appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: "Hide \(appName)", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        let hideOthers = appMenu.addItem(withTitle: "Hide Others",
+                                         action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
+        hideOthers.keyEquivalentModifierMask = [.command, .option]
+        appMenu.addItem(withTitle: "Show All", action: #selector(NSApplication.unhideAllApplications(_:)), keyEquivalent: "")
+        appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Quit \(appName)", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         addSubmenu(appMenu, to: main)
 
@@ -358,6 +381,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         viewMenu.addItem(withTitle: "Instagram", action: #selector(showInstagram(_:)), keyEquivalent: "2").target = self
         viewMenu.addItem(.separator())
         viewMenu.addItem(withTitle: "Reload", action: #selector(reloadCurrent(_:)), keyEquivalent: "r").target = self
+        viewMenu.addItem(withTitle: "Back", action: #selector(goBack(_:)), keyEquivalent: "[").target = self
+        let home = viewMenu.addItem(withTitle: "Go to Inbox", action: #selector(goHome(_:)), keyEquivalent: "h")
+        home.keyEquivalentModifierMask = [.command, .shift]
+        home.target = self
         addSubmenu(viewMenu, to: main)
 
         let windowMenu = NSMenu(title: "Window")
