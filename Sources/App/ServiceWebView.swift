@@ -1,0 +1,224 @@
+import AppKit
+import WebKit
+
+/// Owns one service's persistent `WKWebView`: its data store, the injected bridge,
+/// link routing, downloads, file uploads and media permissions.
+@MainActor
+final class ServiceWebController: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler, WKDownloadDelegate {
+    static let userAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15"
+    static let messengerFallbackURL = URL(string: "https://www.facebook.com/messages/")!
+    private static let messengerHosts = ["messenger.com", "facebook.com"]
+
+    let service: Service
+    let webView: WKWebView
+    /// Parsed bridge messages (`{type: "title" | "notify", ...}`) from the main frame.
+    var onMessage: (([String: Any]) -> Void)?
+
+    private var pageVisible = false
+    private var firstLoadDone = false
+    private var fallbackUsed = false
+
+    init(service: Service) {
+        self.service = service
+
+        let config = WKWebViewConfiguration()
+        config.websiteDataStore = WKWebsiteDataStore(forIdentifier: service.dataStoreID)
+        config.preferences.isElementFullscreenEnabled = true
+        let content = WKUserContentController()
+        content.addUserScript(WKUserScript(
+            source: BridgeScript.source(for: service.id),
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true
+        ))
+        config.userContentController = content
+
+        webView = WKWebView(frame: .zero, configuration: config)
+        webView.customUserAgent = Self.userAgent
+        webView.allowsBackForwardNavigationGestures = false
+
+        super.init()
+
+        // The content controller retains its handler; controllers live for the app's lifetime.
+        content.add(self, name: BridgeScript.handlerName)
+        webView.navigationDelegate = self
+        webView.uiDelegate = self
+        webView.load(URLRequest(url: service.startURL))
+    }
+
+    // MARK: - Commands
+
+    func reload() {
+        if webView.url == nil {
+            webView.load(URLRequest(url: service.startURL))
+        } else {
+            webView.reload()
+        }
+    }
+
+    /// Tells the page whether it is on screen. The value is re-applied after every load,
+    /// because each new document starts hidden.
+    func setPageVisible(_ visible: Bool) {
+        pageVisible = visible
+        applyVisibility()
+    }
+
+    func notificationClicked(id: String) {
+        guard let data = try? JSONSerialization.data(withJSONObject: id, options: .fragmentsAllowed),
+              let literal = String(data: data, encoding: .utf8) else { return }
+        webView.evaluateJavaScript(
+            "window.__umNotificationClicked && window.__umNotificationClicked(\(literal));",
+            completionHandler: nil
+        )
+    }
+
+    private func applyVisibility() {
+        webView.evaluateJavaScript(
+            "window.__umSetVisible && window.__umSetVisible(\(pageVisible ? "true" : "false"));",
+            completionHandler: nil
+        )
+    }
+
+    // MARK: - WKScriptMessageHandler
+
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard message.frameInfo.isMainFrame,
+              let body = message.body as? [String: Any] else { return }
+        onMessage?(body)
+    }
+
+    // MARK: - WKNavigationDelegate
+
+    func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction) async -> WKNavigationActionPolicy {
+        if navigationAction.shouldPerformDownload { return .download }
+        if let frame = navigationAction.targetFrame, !frame.isMainFrame { return .allow }
+        guard let url = navigationAction.request.url else { return .allow }
+        switch LinkRouter.decide(url, for: service) {
+        case .inApp:
+            return .allow
+        case .external(let target):
+            NSWorkspace.shared.open(target)
+            return .cancel
+        }
+    }
+
+    func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse) async -> WKNavigationResponsePolicy {
+        navigationResponse.canShowMIMEType ? .allow : .download
+    }
+
+    func webView(_ webView: WKWebView, navigationAction: WKNavigationAction, didBecome download: WKDownload) {
+        download.delegate = self
+    }
+
+    func webView(_ webView: WKWebView, navigationResponse: WKNavigationResponse, didBecome download: WKDownload) {
+        download.delegate = self
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        applyVisibility()
+        if !firstLoadDone {
+            firstLoadDone = true
+            if service.id == .messenger, !isMessengerHost(webView.url) {
+                loadMessengerFallback()
+            }
+        }
+    }
+
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        handleLoadFailure(error)
+    }
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        handleLoadFailure(error)
+    }
+
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        reload()
+    }
+
+    private func handleLoadFailure(_ error: Error) {
+        let nsError = error as NSError
+        // Cancellations (redirects, policy decisions, downloads) are not real failures.
+        if nsError.domain == NSURLErrorDomain, nsError.code == NSURLErrorCancelled { return }
+        if nsError.domain == "WebKitErrorDomain", nsError.code == 102 { return } // frame load interrupted by policy change
+        guard !firstLoadDone else { return }
+        firstLoadDone = true
+        if service.id == .messenger { loadMessengerFallback() }
+    }
+
+    private func isMessengerHost(_ url: URL?) -> Bool {
+        guard let host = url?.host?.lowercased() else { return false }
+        return Self.messengerHosts.contains { host == $0 || host.hasSuffix("." + $0) }
+    }
+
+    private func loadMessengerFallback() {
+        guard !fallbackUsed else { return }
+        fallbackUsed = true
+        webView.load(URLRequest(url: Self.messengerFallbackURL))
+    }
+
+    // MARK: - WKUIDelegate
+
+    func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+        // A blank popup (window.open() with no URL) has nothing to route; loading
+        // about:blank here would wipe the current page.
+        guard let url = navigationAction.request.url, url.absoluteString != "about:blank",
+              !url.absoluteString.isEmpty else { return nil }
+        switch LinkRouter.decide(url, for: service) {
+        case .inApp:
+            webView.load(navigationAction.request)
+        case .external(let target):
+            NSWorkspace.shared.open(target)
+        }
+        return nil
+    }
+
+    func webView(_ webView: WKWebView, runOpenPanelWith parameters: WKOpenPanelParameters, initiatedByFrame frame: WKFrameInfo) async -> [URL]? {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = parameters.allowsMultipleSelection
+        panel.canChooseDirectories = parameters.allowsDirectories
+        panel.canChooseFiles = true
+        let response: NSApplication.ModalResponse
+        if let window = webView.window {
+            response = await panel.beginSheetModal(for: window)
+        } else {
+            response = panel.runModal()
+        }
+        return response == .OK ? panel.urls : nil
+    }
+
+    func webView(_ webView: WKWebView, decideMediaCapturePermissionsFor origin: WKSecurityOrigin, initiatedBy frame: WKFrameInfo, type: WKMediaCaptureType) async -> WKPermissionDecision {
+        var components = URLComponents()
+        components.scheme = origin.protocol
+        components.host = origin.host
+        guard let url = components.url else { return .deny }
+        return LinkRouter.decide(url, for: service) == .inApp ? .grant : .deny
+    }
+
+    // MARK: - WKDownloadDelegate
+
+    func download(_ download: WKDownload, decideDestinationUsing response: URLResponse, suggestedFilename: String) async -> URL? {
+        let fm = FileManager.default
+        let folder = fm.urls(for: .downloadsDirectory, in: .userDomainMask).first
+            ?? fm.homeDirectoryForCurrentUser.appendingPathComponent("Downloads", isDirectory: true)
+        return Self.uniqueURL(in: folder, for: suggestedFilename)
+    }
+
+    /// `name.ext`, then `name (1).ext`, `name (2).ext`, … until no file exists.
+    static func uniqueURL(in folder: URL, for suggestedFilename: String) -> URL {
+        let fm = FileManager.default
+        var filename = (suggestedFilename as NSString).lastPathComponent
+        if filename.isEmpty || filename == "." || filename == ".." { filename = "download" }
+        var candidate = folder.appendingPathComponent(filename)
+        guard fm.fileExists(atPath: candidate.path) else { return candidate }
+
+        let base = (filename as NSString).deletingPathExtension
+        let ext = (filename as NSString).pathExtension
+        var n = 1
+        repeat {
+            let name = ext.isEmpty ? "\(base) (\(n))" : "\(base) (\(n)).\(ext)"
+            candidate = folder.appendingPathComponent(name)
+            n += 1
+        } while fm.fileExists(atPath: candidate.path)
+        return candidate
+    }
+}
