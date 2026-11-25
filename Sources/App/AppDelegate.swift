@@ -14,7 +14,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     // MARK: - NSApplicationDelegate
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        activity = ProcessInfo.processInfo.beginActivity(options: .userInitiated, reason: "Receive messages")
+        activity = ProcessInfo.processInfo.beginActivity(options: .userInitiatedAllowingIdleSystemSleep, reason: "Receive messages")
 
         for service in Service.all {
             let controller = ServiceWebController(service: service)
@@ -101,7 +101,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             NSLayoutConstraint.activate([
                 webView.leadingAnchor.constraint(equalTo: content.view.leadingAnchor),
                 webView.trailingAnchor.constraint(equalTo: content.view.trailingAnchor),
-                webView.topAnchor.constraint(equalTo: content.view.topAnchor),
+                // Safe-area pin keeps pages below the titlebar even if .fullSizeContentView is ever added back.
+                webView.topAnchor.constraint(equalTo: content.view.safeAreaLayoutGuide.topAnchor),
                 webView.bottomAnchor.constraint(equalTo: content.view.bottomAnchor),
             ])
         }
@@ -111,7 +112,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1100, height: 750),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            // No .fullSizeContentView: web content must never sit under the titlebar (clicks there drag the window).
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )

@@ -7,7 +7,6 @@ import WebKit
 final class ServiceWebController: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler, WKDownloadDelegate {
     static let userAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15"
     static let messengerFallbackURL = URL(string: "https://www.facebook.com/messages/")!
-    private static let messengerHosts = ["messenger.com", "facebook.com"]
 
     let service: Service
     let webView: WKWebView
@@ -117,7 +116,7 @@ final class ServiceWebController: NSObject, WKNavigationDelegate, WKUIDelegate, 
         applyVisibility()
         if !firstLoadDone {
             firstLoadDone = true
-            if service.id == .messenger, !isMessengerHost(webView.url) {
+            if service.id == .messenger, !isServiceHost(webView.url) {
                 loadMessengerFallback()
             }
         }
@@ -145,9 +144,10 @@ final class ServiceWebController: NSObject, WKNavigationDelegate, WKUIDelegate, 
         if service.id == .messenger { loadMessengerFallback() }
     }
 
-    private func isMessengerHost(_ url: URL?) -> Bool {
+    /// True when `url` is on one of the service's own hosts (e.g. a meta.com login page counts).
+    private func isServiceHost(_ url: URL?) -> Bool {
         guard let host = url?.host?.lowercased() else { return false }
-        return Self.messengerHosts.contains { host == $0 || host.hasSuffix("." + $0) }
+        return service.allowedHostSuffixes.contains { host == $0 || host.hasSuffix("." + $0) }
     }
 
     private func loadMessengerFallback() {
@@ -187,8 +187,11 @@ final class ServiceWebController: NSObject, WKNavigationDelegate, WKUIDelegate, 
     }
 
     func webView(_ webView: WKWebView, decideMediaCapturePermissionsFor origin: WKSecurityOrigin, initiatedBy frame: WKFrameInfo, type: WKMediaCaptureType) async -> WKPermissionDecision {
+        // Opaque origins have an empty protocol/host; setting an empty scheme would trap.
+        guard !origin.protocol.isEmpty, !origin.host.isEmpty,
+              ["http", "https"].contains(origin.protocol.lowercased()) else { return .deny }
         var components = URLComponents()
-        components.scheme = origin.protocol
+        components.scheme = origin.protocol.lowercased()
         components.host = origin.host
         guard let url = components.url else { return .deny }
         return LinkRouter.decide(url, for: service) == .inApp ? .grant : .deny
