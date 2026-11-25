@@ -2,6 +2,7 @@ import Foundation
 
 runUnreadCountTests()
 runLinkRouterTests()
+runNotificationRulesTests()
 
 if testFailures > 0 {
     print("\(testFailures) failures")
