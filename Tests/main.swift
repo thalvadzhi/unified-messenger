@@ -4,6 +4,7 @@ runUnreadCountTests()
 runLinkRouterTests()
 runNotificationRulesTests()
 runBridgeScriptTests()
+runLoadRulesTests()
 
 if testFailures > 0 {
     print("\(testFailures) failures")

@@ -102,11 +102,20 @@ final class ServiceWebController: NSObject, WKNavigationDelegate, WKUIDelegate, 
         case .external(let target):
             NSWorkspace.shared.open(target)
             return .cancel
+        case .blocked:
+            NSLog("[um] blocked %@", url.scheme ?? "")
+            return .cancel
         }
     }
 
     func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse) async -> WKNavigationResponsePolicy {
-        navigationResponse.canShowMIMEType ? .allow : .download
+        if !navigationResponse.canShowMIMEType { return .download }
+        if navigationResponse.isForMainFrame,
+           let http = navigationResponse.response as? HTTPURLResponse,
+           LoadRules.isAttachment(contentDisposition: http.value(forHTTPHeaderField: "Content-Disposition")) {
+            return .download
+        }
+        return .allow
     }
 
     func webView(_ webView: WKWebView, navigationAction: WKNavigationAction, didBecome download: WKDownload) {
@@ -178,6 +187,8 @@ final class ServiceWebController: NSObject, WKNavigationDelegate, WKUIDelegate, 
             webView.load(navigationAction.request)
         case .external(let target):
             NSWorkspace.shared.open(target)
+        case .blocked:
+            NSLog("[um] blocked %@", url.scheme ?? "")
         }
         return nil
     }

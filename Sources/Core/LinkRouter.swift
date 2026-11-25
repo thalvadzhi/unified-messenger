@@ -3,9 +3,13 @@ import Foundation
 enum LinkDecision: Equatable {
     case inApp
     case external(URL)
+    /// Not loaded and not handed to another app (e.g. file:, smb:, custom app schemes).
+    case blocked
 }
 
 enum LinkRouter {
+    /// The only schemes a page may hand to another app.
+    private static let externalSchemes: Set<String> = ["http", "https", "mailto", "tel"]
     private static let shimHosts: Set<String> = ["l.facebook.com", "l.messenger.com", "l.instagram.com"]
 
     /// Called only for main-frame navigations and new-window requests.
@@ -28,6 +32,6 @@ enum LinkRouter {
         if isWeb, service.allowedHostSuffixes.contains(where: { host == $0 || host.hasSuffix("." + $0) }) {
             return .inApp
         }
-        return .external(url)
+        return externalSchemes.contains(scheme) ? .external(url) : .blocked
     }
 }

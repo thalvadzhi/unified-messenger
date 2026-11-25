@@ -29,5 +29,23 @@ func runLinkRouterTests() {
         check(r != .external(u("javascript:alert(1)")), "\(r)")
     }
     test("fbcdn subdomain in instagram") { let r = d("https://scontent.fbcdn.net/x.jpg", i); check(r == .inApp, "\(r)") }
+    test("file scheme blocked") { let r = d("file:///etc/passwd", m); check(r == .blocked, "\(r)") }
+    test("smb scheme blocked") { let r = d("smb://host/share", i); check(r == .blocked, "\(r)") }
+    test("system settings scheme blocked") {
+        let r = d("x-apple.systempreferences:com.apple.preference.security?Privacy", m); check(r == .blocked, "\(r)")
+    }
+    test("custom app scheme blocked") { let r = d("zoommtg://zoom.us/join?confno=1", m); check(r == .blocked, "\(r)") }
+    test("javascript scheme blocked") { let r = d("javascript:alert(1)", m); check(r == .blocked, "\(r)") }
+    test("tel external") { let r = d("tel:+15551234", i); check(r == .external(u("tel:+15551234")), "\(r)") }
+    test("https external") { let r = d("https://example.com/x", i); check(r == .external(u("https://example.com/x")), "\(r)") }
+    test("uppercase MAILTO external") { let r = d("MAILTO:a@b.c", m); check(r == .external(u("MAILTO:a@b.c")), "\(r)") }
+    test("shim with file u never external") {
+        let r = d("https://l.facebook.com/l.php?u=file%3A%2F%2F%2Fetc%2Fpasswd", m)
+        check(r != .external(u("file:///etc/passwd")), "\(r)")
+    }
+    test("shim with smb u never external") {
+        let r = d("https://l.instagram.com/?u=smb%3A%2F%2Fhost%2Fshare", i)
+        check(r != .external(u("smb://host/share")), "\(r)")
+    }
     test("Service.with") { check(Service.with(.instagram) == Service.instagram, "") }
 }
