@@ -18,4 +18,16 @@ func runLinkRouterTests() {
     test("ig link shim") { let r = d("https://l.instagram.com/?u=https%3A%2F%2Fexample.com", i); check(r == .external(u("https://example.com")), "\(r)") }
     test("mailto external") { let r = d("mailto:a@b.c", m); check(r == .external(u("mailto:a@b.c")), "\(r)") }
     test("blob in app") { let r = d("blob:https://www.messenger.com/abc", m); check(r == .inApp, "\(r)") }
+    test("start URLs pinned") {
+        check(m.startURL == u("https://www.messenger.com/"), "\(m.startURL)")
+        check(i.startURL == u("https://www.instagram.com/direct/inbox/"), "\(i.startURL)")
+    }
+    test("uppercase scheme and host") { let r = d("HTTPS://WWW.MESSENGER.COM/t/1", m); check(r == .inApp, "\(r)") }
+    test("shim without u does not crash") { _ = d("https://l.facebook.com/l.php", m) }
+    test("shim with javascript u not external") {
+        let r = d("https://l.facebook.com/l.php?u=javascript%3Aalert(1)", m)
+        check(r != .external(u("javascript:alert(1)")), "\(r)")
+    }
+    test("fbcdn subdomain in instagram") { let r = d("https://scontent.fbcdn.net/x.jpg", i); check(r == .inApp, "\(r)") }
+    test("Service.with") { check(Service.with(.instagram) == Service.instagram, "") }
 }

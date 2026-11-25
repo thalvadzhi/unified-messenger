@@ -27,7 +27,7 @@ extension Service {
         id: .instagram,
         name: "Instagram",
         symbolName: "camera.fill",
-        startURL: URL(string: "https://www.instagram.com/")!,
+        startURL: URL(string: "https://www.instagram.com/direct/inbox/")!,
         allowedHostSuffixes: ["instagram.com", "cdninstagram.com", "fbcdn.net", "facebook.com", "meta.com"],
         dataStoreID: UUID(uuidString: "8E1C6A62-3B0F-4C2D-9C55-0A7E5B1D2F02")!
     )
